@@ -1,0 +1,993 @@
+---
+title: "Supplemental Methods - Epigenenomics of Sample_Group in Heart Failure"
+author: "Mark E. Pepin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+  html_document: 
+    keep_md: yes
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{multirow}
+- \usepackage[table]{xcolor}
+- \usepackage{wrapfig}
+- \usepackage{float}
+- \usepackage{colortbl}
+- \usepackage{pdflscape}
+- \usepackage{tabu}
+- \usepackage{threeparttable}
+mainfont: Times
+fontsize: 10pt
+always_allow_html: yes
+editor_options:
+  markdown:
+    wrap: 72
+  chunk_output_type: inline
+---
+
+```{r setup_markdown, include=FALSE}
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=30),tidy=FALSE, warning = FALSE, message = FALSE, cache.lazy = T)
+options(knitr.kable.NA = '')
+```
+
+**Code Author**: Mark E. Pepin, MD, PhD, MS **Contact**:
+[pepinme\@gmail.com](mailto:pepinme@gmail.com){.email} **Institution**:
+Heidelberg University Hospital **Location**: 669 Neuenheimer Feld,
+Institute for Experimental Cardiology, 69120 Heidelberg, Germany
+
+# Preliminary Setup
+
+## Parameters
+
+Define the parameters used, along with the conditions required for the
+current analysis. This segment must be modified for each analysis
+performed.
+
+```{r Parameters}
+##Set the experimental conditions [MUST DO THIS MANUALLY]
+Run_tS<-Sys.time()
+TREATMENT=c("CON", "DCM")
+CELL=c("iPSC")
+STATISTIC = 0.05 #P statistic threshold used in this combination.
+VARIABLE = TREATMENT
+COMPARISON= paste0(CELL[1], "_",VARIABLE[2], "_vs_", VARIABLE[1])
+
+# Candidate Gene Selection (RNA-sequencing) EDIT THIS LIST BASED ON INTERESTS.
+GENES=c("LEP", "ADIPOQ", "PLIN1")
+VAR1="Treatment"
+VAR2="Diabetes"
+# Single Bar Graph
+library(dplyr)
+my_comparisons <- list( c("CON", "DCM")) # Comparisons to make
+## Create color based on Genotype
+ann_colors = list(Treatment = c(DCM="darkgray", CON = "darkcyan"))
+TreatmentColors<-ann_colors$Treatment
+ann_colorTable<-as.data.frame(ann_colors)
+
+ann_colGroup<-subset(ann_colorTable, rownames(ann_colorTable) %in% TREATMENT)
+ann_colListGroup<-list(ann_colors$Treatment)
+ann_colGroupVec<-ann_colGroup$Treatment
+names(ann_colGroupVec)<-as.factor(rownames(ann_colGroup))
+GROUP_colors<-list(ann_colGroupVec=ann_colGroupVec)
+
+# Create Output Folder Structure
+ifelse(!dir.exists(file.path(paste0("../2_Output/"))), dir.create(file.path(paste0("../2_Output/"))), FALSE)
+ifelse(!dir.exists(file.path(paste0("../2_Output/", COMPARISON))), dir.create(file.path(paste0("../2_Output/", COMPARISON))), FALSE)
+```
+
+## Packages
+
+```{r packages}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, Hmisc, openxlsx, corrplot, RColorBrewer, kableExtra, ggplot2, gridExtra, ggpubr, ggsignif, DESeq2, data.table, GenomicFeatures, biomaRt, Haplin, pheatmap, calibrate, ggrepel, tidyr, gtools)
+```
+
+# Genome-wide DNA methylation - Illumina(R) HumanMethylation 450k Methylation
+
+```{r EPIC_Import, echo=TRUE}
+library(minfi)
+library(limma)
+library(shinyMethyl)
+library(dplyr)
+library(IlluminaHumanMethylation450kmanifest)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(RColorBrewer)
+#########Part 1: Importing the Data
+#Parameters
+##Get the array annotation
+annoM450k<-getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+annoM450k<-dplyr::select(as.data.frame(annoM450k), Name, chr, pos, Relation_to_Island, UCSC_RefGene_Name, UCSC_RefGene_Accession, UCSC_RefGene_Group, Regulatory_Feature_Group)
+#Import the sample sheet
+targets<-read.metharray.sheet(base="../1_Input/IDAT", pattern=".csv")
+ #Import the annotation file
+AnnoTargets<-targets
+targets$ID <- paste(targets$Sample_Group,targets$Sample_Name,sep=".")
+targets$Sample_Well<-AnnoTargets$Sample_Well
+targets$Sample_Plate<-AnnoTargets$Sample_Plate
+targets$Sample_Group<-AnnoTargets$Sample_Group
+targets$Sample_Group<-factor(targets$Sample_Group, levels = c("CON", "DCM"))
+targets$Sex<-AnnoTargets$Sex
+targets$Outcome<-AnnoTargets$Outcome
+targets$Conc<-AnnoTargets$Conc
+targets$Col_ID<-AnnoTargets$Col_ID
+targets$Tissue<-AnnoTargets$Tissue
+targets<-targets %>% filter(Tissue %in% CELL)
+
+#Import the array data from input directory (red and green .idat files)
+RGSet<-read.metharray.exp(base = "../1_Input/IDAT", targets = targets, verbose = TRUE)
+sampleNames(RGSet)<-targets$Sample_Name
+##Quality Control
+#First step is to identify CpGs that failed to identify methylated positions (defined by expression intensity that reflects background levels)
+detP<-detectionP(RGSet)
+PLOT.COL <- brewer.pal(8,"Dark2")
+##Detection P-value Plot
+pdf(file=paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_detectionP.pdf"))
+par(mfrow=c(1,1))
+barplot(colMeans(detP), col=PLOT.COL[factor(targets$Sample_Group)], 
+        cex.names=0.8, ylim=c(0,0.005), ylab="Mean detection p-values")
+abline(h=0.05,col="red")
+legend("topleft", legend=levels(factor(targets$Sample_Group)), fill=PLOT.COL, 
+       bg="white")
+dev.off()
+## Filter RGSet by detection P-value
+keep <- colMeans(detP) < 0.05
+RGSet <- RGSet[,keep]
+RGSet
+##QC Report
+qcReport(RGSet, sampNames=targets$ID, sampGroups=targets$Sample_Group, pdf="qcReport.pdf")
+#
+par(mfrow=c(1,1))
+barplot(colMeans(detP), col=PLOT.COL[factor(targets$Sample_Group)], las=2, 
+        cex.names=0.8, ylim=c(0,0.005), ylab="Mean detection p-values")
+abline(h=0.05,col="red")
+legend("topleft", legend=levels(factor(targets$Sample_Group)), fill=PLOT.COL, 
+       bg="white")
+# #Determine the fraction of "failed" CpG probes (those which failed to identify a methylated CpG)
+# colMeans(failed)
+#Convert R/G to Methylated/Unmethylated in an object of class MethylSet
+MSet<-preprocessRaw(RGSet)
+#QC data
+qc<-getQC(MSet)
+plotQC(qc)
+pdf(file=paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_QC.Methyl.pdf"))
+plotQC(qc)
+dev.off()
+##Density plot
+# densityPlot(RGSet, sampGroups = targets$Sample_Group, main= "Beta", xlab = "Beta")
+pdf(file=paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_densityPlot.pdf"))
+densityPlot(RGSet, sampGroups = targets$Sample_Group, main= "Beta", xlab = "Beta")
+dev.off()
+densityBeanPlot(RGSet, sampGroups = targets$Sample_Group)
+pdf(file=paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_BeanPlot.pdf"))
+densityBeanPlot(RGSet, sampGroups = targets$Sample_Group)
+dev.off()
+qcReport(RGSet, pdf= paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_qcReport.pdf"))
+# #Convert to a shinyMethyl dataset (nice summary of the quality control)
+# summarized.data <- shinySummarize(RGSet)
+# runShinyMethyl(summarized.data)
+
+gRatioSet.quantile <- preprocessQuantile(RGSet, fixOutliers = TRUE, removeBadSamples = TRUE, badSampleCutoff = 10.5, quantileNormalize = TRUE, stratified = TRUE, mergeManifest = FALSE)
+beta.all<-getBeta(RGSet)
+write.csv(beta.all, "../1_Input/EPIC.betaValues.csv")
+```
+
+## Supplemental Figure SXX: Outlier Analysis
+
+```{r outliers, fig.cap="Supplemental Figure"}
+par(mfrow=c(1,1))
+barplot(colMeans(detP), col=PLOT.COL[factor(targets$Sample_Group)], las=2, 
+        cex.names=0.8, ylim=c(0,0.005), ylab="Mean detection p-values")
+abline(h=0.05,col="red")
+legend("topleft", legend=levels(factor(targets$Sample_Group)), fill=PLOT.COL, 
+       bg="white")
+```
+
+<!-- ## Supplemental: SNPs in Methylation Data -->
+
+<!-- SNPs have been shown to confound the interpretation of methylation arrays when mutations exist within the CpG sites. To address this concern, a package called "MethylToSNP" exists to identify novel SNPs based on methylation array data, which has been proposed to reduce the number of CpGs that are filtered. Using this approach, XXXX CpGs were identified as putative SNPs which are likely influenced by minor allele fractions (MAFs); among these, XXXX have been identified as SNPs via published genomic sequencing analyses. -->
+
+<!-- ```{r SNPs, fig.cap = "Supplemental Figure S4: Putative SNP Identification from CpG Probe Intensity"} -->
+<!-- #Remove SNPs -->
+<!-- ##Option 1: Built-in function that removes all known SNPs -->
+<!-- gRatioSet_noSNPs<-dropLociWithSnps(gRatioSet.quantile, snps = c("SBE", "CpG"), maf = 0) -->
+<!-- ##Option 2: Identify putative SNPs using methylation barcoding (i.e. "gap hunting") -->
+<!-- library("MethylToSNP") -->
+<!-- library("RColorBrewer") -->
+<!-- library("pheatmap") -->
+<!-- library("magrittr") -->
+<!-- Mvalues<-as.data.frame(getM(MSet)) -->
+<!-- x <- MethylToSNP(MSet,verbose=TRUE) -->
+<!-- x$CpG_ID<-rownames(x) -->
+<!-- ### -->
+<!-- pdf(file="../2_Output/Putative.SNPs.pdf", width = 10, height = 5) #Print Putative SNP Methylation -->
+<!-- plotPotentialSNPs(x, MSet) -->
+<!-- dev.off() -->
+<!-- plotPotentialSNPs(x, MSet) -->
+<!-- SNPs<-merge(x, as.data.frame(getM(MSet)), by = "row.names") -->
+<!-- write.csv(SNPs, "../2_Output/SNPs.csv") -->
+<!-- SNPs_matrix<-SNPs %>% set_rownames(.$Row.names) -->
+<!-- SNPs_matrix<-SNPs_matrix[,13:ncol(SNPs_matrix)] %>% as.matrix() -->
+<!-- SNPs_matrix<-SNPs_matrix[!is.infinite(rowSums(SNPs_matrix)),] #One infinite value exists!! (took ~2-3 days to troubleshoot) -->
+<!-- # Index -->
+<!-- Index<-read.csv("../1_Input/colData.csv") -->
+<!-- Index_SNPs<-Index[colnames(SNPs_matrix),] %>% dplyr::select(Sample_Group) -->
+<!-- ann_colors = list(Sample_Group = c(DCM="#1b9e77", CON = "#d95f02")) -->
+<!-- paletteLength <- 100 -->
+<!-- myColor <- colorRampPalette(c("dodgerblue4", "white", "gold2"))(paletteLength) -->
+<!-- ann_colors = list(Sample_Group = c(DCM="#1b9e77", -->
+<!--                            CON = "#d95f02")) -->
+
+<!-- heatmap_SNP<-pheatmap::pheatmap(SNPs_matrix, scale="row", #Heatmap of SNPs -->
+<!--                       cluster_cols = TRUE, -->
+<!--                       cluster_rows = TRUE, -->
+<!--                      cutree_cols = 3, -->
+<!--                      cutree_rows = 4, -->
+<!--                      angle_col = 45, -->
+<!--                      fontsize_col = 8, -->
+<!--                      color = myColor, -->
+<!--                      show_rownames = FALSE, -->
+<!--                      border_color = NA, -->
+<!--                      annotation_colors = ann_colors, -->
+<!--                      annotation_col = Index_SNPs, -->
+<!--                     filename = paste0("../2_Output/SNPS.heatmap.pdf")) -->
+<!-- pheatmap(SNPs_matrix, scale="row", #Heatmap of SNPs -->
+<!--                       cluster_cols = TRUE, -->
+<!--                       cluster_rows = TRUE, -->
+<!--                      cutree_cols = 3, -->
+<!--                      cutree_rows = 4, -->
+<!--                      fontsize_col = 8, -->
+<!--                      color = myColor, -->
+<!--                      show_rownames = FALSE, -->
+<!--                      border_color = NA, -->
+<!--                      annotation_colors = ann_colors, -->
+<!--                      annotation_col = Index_SNPs) -->
+<!-- ## Cluster Analysis -->
+<!-- hc <-heatmap_SNP$tree_row -->
+<!-- lbl <- cutree(hc, 4) # split gene dendrogram in 5 groups -->
+<!-- cluster1<-which(lbl==1) -->
+<!-- cluster2<-which(lbl==2) -->
+<!-- cluster3<-which(lbl==3) -->
+<!-- cluster4<-which(lbl==4) -->
+<!-- # -->
+<!-- Cluster1_data<-SNPs_matrix[cluster1,] -->
+<!-- Cluster2_data<-SNPs_matrix[cluster2,] -->
+<!-- Cluster3_data<-SNPs_matrix[cluster3,] -->
+<!-- Cluster4_data<-SNPs_matrix[cluster4,] -->
+<!-- # -->
+
+<!-- heatmap_c1<-pheatmap(Cluster1_data, scale="row", -->
+<!--                       cluster_cols = TRUE, -->
+<!--                       cluster_rows = TRUE, -->
+<!--                       #breaks = myBreaks, -->
+<!--                       cutree_cols = 2, -->
+<!--                       angle_col = 45, -->
+<!--                       fontsize_col = 8, -->
+<!--                       color = myColor, -->
+<!--                       show_rownames = FALSE, -->
+<!--                       border_color = NA, -->
+
+<!--                       annotation_colors = ann_colors, -->
+
+<!--                      annotation_col = Index_SNPs, -->
+
+<!--                       filename = paste0("../2_Output/SNPS_Cluster1.heatmap.pdf")) -->
+
+<!-- # -->
+
+<!-- heatmap_c2<-pheatmap(Cluster2_data, scale="row", -->
+
+<!--                       cluster_cols = TRUE, -->
+
+<!--                       cluster_rows = TRUE, -->
+
+<!--                       #breaks = myBreaks, -->
+
+<!--                       cutree_cols = 2, -->
+
+<!--                       angle_col = 45, -->
+
+<!--                       fontsize_col = 8, -->
+
+<!--                       color = myColor, -->
+
+<!--                       show_rownames = FALSE, -->
+
+<!--                       border_color = NA, -->
+
+<!--                      annotation_colors = ann_colors, -->
+
+<!--                      annotation_col = Index_SNPs, -->
+
+<!--                       filename = paste0("../2_Output/SNPS_Cluster2.heatmap.pdf")) -->
+
+<!-- # -->
+
+<!-- heatmap_c3<-pheatmap(Cluster3_data, scale="row", -->
+<!--                       cluster_cols = TRUE, -->
+<!--                       cluster_rows = TRUE, -->
+<!--                       #breaks = myBreaks, -->
+<!--                       cutree_cols = 2, -->
+<!--                       angle_col = 45, -->
+<!--                       fontsize_col = 8, -->
+<!--                       color = myColor, -->
+<!--                       show_rownames = FALSE, -->
+<!--                       border_color = NA, -->
+<!--                      annotation_colors = ann_colors, -->
+<!--                      annotation_col = Index_SNPs, -->
+<!--                       filename = paste0("../2_Output/SNPS_Cluster3.heatmap.pdf")) -->
+
+<!-- # -->
+
+<!-- heatmap_c4<-pheatmap(Cluster4_data, scale="row", -->
+<!--                       cluster_cols = TRUE, -->
+<!--                       cluster_rows = TRUE, -->
+<!--                       #breaks = myBreaks, -->
+<!--                       cutree_cols = 2, -->
+<!--                       angle_col = 45, -->
+<!--                       fontsize_col = 8, -->
+<!--                       color = myColor, -->
+<!--                       show_rownames = FALSE, -->
+<!--                       border_color = NA, -->
+<!--                      annotation_colors = ann_colors, -->
+<!--                      annotation_col = Index_SNPs, -->
+<!--                       filename = paste0("../2_Output/SNPS_Cluster4.heatmap.pdf")) -->
+
+<!-- ``` -->
+
+## Figure 2A: MDS Plot - Unsupervised Clustering by "Sample_Group"
+
+Because such a robust racial signature in cardiac DNA methylation was
+seen in the pilot analysis, we reproduced the unsupervised method in the
+larger cohort. This time, we continue to see a distinct racial
+difference. Furthermore, we found that this racially-determined
+clustering persisted to among the 500,000 most-variable CpG probes in
+the EPIC array.
+
+```{r MDS.methyl, echo=FALSE,results='hide',fig.keep='all'}
+library(limma)
+options(ggrepel.max.overlaps = Inf)
+pdf(file=paste0("../2_Output/", COMPARISON, "_MDS.4way.pdf"), height = 10, width = 10)
+##MDS Plot
+par(mfrow=c(2,2))
+PLOT.COL <- brewer.pal(8,"Dark2")
+#top 1 000
+plotMDS(getM(gRatioSet.quantile), cex = 1, top=1000, gene.selection="common",
+        col=PLOT.COL[factor(targets$Sample_Group)], main = "MDS - Top 1,000")
+legend("topright", legend=levels(factor(targets$Sample_Group)), text.col=PLOT.COL,
+       bg="white", cex=0.7)
+# Top 10 000
+plotMDS(getM(gRatioSet.quantile), top=10000, gene.selection="common",
+        col=PLOT.COL[factor(targets$Sample_Group)], polygon = TRUE, main = "MDS - Top 10,000")
+legend("topright", legend=levels(factor(targets$Sample_Group)), text.col=PLOT.COL,
+       bg="white", cex=0.7)
+# Top 50 000
+plotMDS(getM(gRatioSet.quantile), top=50000, gene.selection="common",
+        col=PLOT.COL[factor(targets$Sample_Group)], polygon = TRUE, main = "MDS - Top 50,000")
+legend("topright", legend=levels(factor(targets$Sample_Group)), text.col=PLOT.COL,
+       bg="white", cex=0.7)
+# Top 100 000
+plotMDS(getM(gRatioSet.quantile), top=300000, gene.selection="common",
+        col=PLOT.COL[factor(targets$Sample_Group)], polygon = TRUE, main = "MDS - Top 500,000")
+legend("topright", legend=levels(factor(targets$Sample_Group)), text.col=PLOT.COL,
+       bg="white", cex=0.7)
+dev.off()
+
+# MDS in ggplot2
+Ntop = 100000
+library(magrittr)
+library(dplyr)
+library(ggpubr)
+library(matrixStats)
+library("ggrepel")
+library(wesanderson)
+MDS.set<-as.data.frame(getM(gRatioSet.quantile))
+# MDS.set<-anti_join(MDS.set, SNPs) # REMOVE THE PUTATIVE SNPs
+RowVar<-rowVars(data.matrix(MDS.set)) #calculate variances for each row (vector)
+MDS.set<-as.data.frame(cbind(MDS.set, RowVar))
+MDS_matrix<-MDS.set %>% arrange(desc(RowVar)) %>% top_n(Ntop,RowVar) #Select top N rows by variance
+# Compute MDS
+mds <- MDS_matrix %>% dplyr::select(-RowVar) %>% t(.) %>%
+  dist() %>%          
+  cmdscale() %>%
+  as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+rownames(mds)<-targets$Sample_Name
+mds$Sample_Name<-rownames(mds)
+mds<-dplyr::inner_join(mds, targets)
+
+#K-means clustering
+clust <- kmeans(mds[,1:2], 2)$cluster %>%
+  as.factor()
+mds <- mds %>%
+  mutate(kmeans.2 = clust)
+###
+library(ggpubr)
+library(cowplot) 
+# Main plot
+pmain <- ggplot(mds, aes(x = Dim.1, y = Dim.2, color = Sample_Group))+
+  scale_color_brewer(palette="Dark2") +
+  theme(panel.background = element_rect("white", colour = "black", size=1.5), 
+      panel.grid.major = element_line(colour = "gray50", size=.75), 
+      panel.grid.minor = element_line(colour = "gray50", size=0.4),
+      legend.position="bottom",
+      legend.key=element_blank(),
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face="bold")) +
+  geom_hline(yintercept = 0, size = 1) + 
+  geom_vline(xintercept=0, size=1) +
+  geom_point()+
+  # stat_ellipse()+
+  geom_text_repel(data=mds, aes(label=Sample_Name), show_guide  = F) +
+  labs(x="Principal Component 1", 
+       y="Principal Component 2")
+# Marginal densities along x axis
+xdens <- axis_canvas(pmain, axis = "x")+
+  geom_density(data = mds, aes(x = Dim.1, fill = Sample_Group),
+              alpha = 0.7, size = 0.2)+
+  scale_fill_brewer(palette="Dark2")
+# Marginal densities along y axis
+ydens <- axis_canvas(pmain, axis = "y", coord_flip = TRUE)+ #must set coord_flip = true if using coord_flip() below
+  geom_density(data = mds, aes(x = Dim.2, fill = Sample_Group),
+                alpha = 0.7, size = 0.2)+
+  coord_flip()+
+  scale_fill_brewer(palette="Dark2")
+p1 <- insert_xaxis_grob(pmain, xdens, grid::unit(.2, "null"), position = "top")
+p2<- insert_yaxis_grob(p1, ydens, grid::unit(.2, "null"), position = "right")
+pdf(file=paste0("../2_Output/",COMPARISON, "_MD.Scatterhist.pdf"), height = 7, width = 7, onefile = F)
+ggdraw(p2)
+dev.off()
+
+ggdraw(p2)
+```
+
+## PCA
+
+```{r PCA_Features}
+#Plot Features of the PCA
+library(dplyr)
+library(plotly)
+##Import the data to be used for PCA
+Index_PCA<-targets
+rownames(Index_PCA)<-Index_PCA$Sample_Name
+PCA_data<-as.data.frame(getM(gRatioSet.quantile))
+#transpose the dataset (required for PCA)
+data.pca<-t(PCA_data)
+data.pca<-as.data.frame(data.pca)
+##merge the file
+data.pca_Final<-merge(Index_PCA, data.pca, by=0)
+rownames(data.pca_Final)<-data.pca_Final$Row.names
+pca.comp<-prcomp(data.pca_Final[,(ncol(Index_PCA)+2):ncol(data.pca_Final)])
+
+pcaCharts=function(x) {
+    x.var <- x$sdev ^ 2
+    x.pvar <- x.var/sum(x.var)
+    par(mfrow=c(2,2))
+    plot(x.pvar,xlab="Principal component",
+         ylab="Proportion of variance", ylim=c(0,1), type='b')
+    plot(cumsum(x.pvar),xlab="Principal component",
+         ylab="Cumulative Proportion of variance",
+         ylim=c(0,1),
+         type='b')
+    screeplot(x)
+    screeplot(x,type="l")
+    par(mfrow=c(1,1))
+}
+pcaCharts(pca.comp)
+
+png(file=paste0("../2_Output/", COMPARISON,  "/", COMPARISON, "_PCA.Charts.png"))
+pcaCharts(pca.comp)
+dev.off()
+```
+
+### 3-Dimensional PCA
+
+From the previous calculations, it is seens that only 2 principal
+components are necessary (accounting for \>80% cumulative variance).
+Nonetheless, below is a 3-D PCA to ensure that all groups are
+characterize to higher-degree of stringency. Nevertheless, a racial
+difference could not be appreciated.
+
+```{r PCA-Summary}
+##Create a 3D-PCA for Inspection
+library(plotly)
+##Index
+Index_PCA<-targets
+rownames(Index_PCA)<-Index_PCA$Sample_Name
+
+PCs<-merge(pca.comp$x, Index_PCA, by=0)
+rownames(PCs)<-PCs$Row.names
+PCs$Group <- as.factor(PCs$Sample_Group)
+fig <- plot_ly(PCs, x = ~PC1, y = ~PC2, z = ~PC3, color = ~Sample_Group, text = ~paste('Sample_Name:', Sample_Name, '<br>Tissue:', Tissue, '<br>Outcome:', Outcome, '<br>Sex:', Sex))
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'PC1'),
+                     yaxis = list(title = 'PC2'),
+                     zaxis = list(title = 'PC3')))
+fig
+```
+
+## Differential Methylation of iPSCs (DCM vs. CON)
+
+## Using Minfi to compute differential expression
+
+Owing to the apparent separation by patient Sample_Group, we chose to
+identify the CpG sites responsible for a Sample_Group-based epigenomic
+difference.
+
+```{r Diff.Meth}
+#Quantification and Differential Expression Analysis
+RGSet<-read.metharray.exp(base = "../1_Input/IDAT", targets = targets, verbose = TRUE)
+# sampleNames(RGSet)<-targets$Sample_Name
+GRset.funnorm <- preprocessFunnorm(RGSet)
+beta <- getBeta(GRset.funnorm)
+M<-getM(GRset.funnorm)
+Condition <- pData(GRset.funnorm)$Sample_Group
+dmp <- dmpFinder(beta, pheno = Condition  , type = "categorical")
+DMPs<-merge(dmp, annoM450k, by= 0)
+DMPs<-as.data.frame(DMPs)
+rownames(DMPs)<-DMPs$Row.names
+DMPs<-DMPs %>% dplyr::select(-Row.names)
+#create an beta table
+beta.table<-as.data.frame(t(beta))
+beta.table$Col_ID<-rownames(beta.table)
+beta_named<-merge(beta.table, targets, by = "Col_ID")
+rownames(beta_named)<-beta_named$Sample_Name
+beta_named<-beta_named %>% dplyr::select(-names(targets)) %>% t()
+write.csv(beta_named, paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_beta.table.csv"))
+#Add beta values to statistics
+Results_dmp<-merge(DMPs, beta_named, by = 0)
+#Calculate Average CpG Methylation by Sample_Group
+library(dplyr)
+library(matrixStats)
+Results<-Results_dmp %>% replace(is.na(.), 0) %>% dplyr::mutate(
+  DCM_SD = rowSds(as.matrix(Results_dmp[,targets$Sample_Name[targets$Sample_Group=="DCM"]])),
+  DCM_Mean = rowMeans(as.matrix(Results_dmp[,targets$Sample_Name[targets$Sample_Group=="DCM"]])),
+  CON_SD = rowSds(as.matrix(Results_dmp[,targets$Sample_Name[targets$Sample_Group=="CON"]])),
+  CON_Mean = rowMeans(as.matrix(Results_dmp[,targets$Sample_Name[targets$Sample_Group=="CON"]])),
+  Methylation.Diff=(DCM_Mean-CON_Mean)*100)
+rownames(Results)<-Results$Row.names
+Results_dmp_p05<-filter(Results, pval<0.05)
+Results_dmp_q05<-filter(Results, qval<0.05)
+#########################################
+#Identify Promoter-associated CpG Islands
+library(tidyr)
+PromCGI<-dplyr::filter(Results_dmp_p05, grepl("Island", Relation_to_Island), grepl("TSS", UCSC_RefGene_Group))
+#Separate Gene Names into unique rows
+PromCGI_sep<-PromCGI %>% mutate(UCSC_RefGene_Name = strsplit(as.character(UCSC_RefGene_Name), ";")) %>% unnest(UCSC_RefGene_Name) %>% distinct()
+#Save a copy of the countData
+library(openxlsx)
+wb_countData<-createWorkbook()
+addWorksheet(wb_countData, "Unfiltered")
+  writeData(wb_countData, "Unfiltered", Results, startCol = 1)
+addWorksheet(wb_countData, "P_0.05")
+  writeData(wb_countData, "P_0.05", Results_dmp_p05, startCol = 1)
+addWorksheet(wb_countData, "Q_0.05")
+  writeData(wb_countData, "Q_0.05", Results_dmp_q05, startCol = 1)
+addWorksheet(wb_countData, "Promoter.CGI")
+  writeData(wb_countData, "Promoter.CGI", PromCGI_sep, startCol = 1)
+saveWorkbook(wb_countData, file = paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_DMPs.xlsx"), overwrite = TRUE)
+```
+
+<!-- ## Regional Methylation -->
+
+<!-- ```{r DMRcate} -->
+<!-- library(DMRcate) -->
+<!-- library(missMethyl) -->
+<!-- library(biomaRt) -->
+<!-- myAnnotation<-cpg.annotate(object = Mvalues, datatype = "array", what = "M", fdr = 0.2, -->
+<!--                            analysis.type = "differential", design = design, -->
+<!--                            contrasts = TRUE, cont.matrix = contMatrix, -->
+<!--                            coef = "Sample_Group", arraytype = "450K") -->
+<!-- design_test<-model.matrix(~targets$Sample_Group) -->
+<!-- DMRs <- dmrcate(myAnnotation, lambda=1000, C=2) #calculates DMRs -->
+<!-- results.ranges <- extractRanges(DMRs) -->
+<!-- beta<-beta[,targets$Sample_Name] #ensure that columns are ordered exactly the same as the targets_filtered table. -->
+<!-- groups <- c(DCM="#1b9e77", CON="#7570b3") -->
+<!-- type<-factor(targets$Sample_Group) -->
+<!-- cols <- groups[as.character(type)] #creates a string of colors for the DMR.plot function -->
+<!-- pdf(file = paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_DMR.top.pdf")) -->
+<!-- DMR.plot(ranges = results.ranges, dmr = 1, CpGs = beta, what = "Beta", arraytype = "450K", phen.col = cols, genome = "hg19") -->
+<!-- dev.off() -->
+<!-- results.ranges.sig<-as.data.frame(results.ranges) %>% filter(Fisher < 0.1) -->
+<!-- enrichment_GO <- goregion(results.ranges[(elementMetadata(results.ranges)[, "overlapping.genes"] %in% results.ranges.sig$overlapping.genes)], all.cpg = rownames(rownames(beta)), collection = "GO", array.type = "450K") -->
+<!-- write.xlsx(results.ranges.sig, paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_DMRs.FDR0.01.xlsx")) -->
+<!-- ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl") #uses human ensembl annotations -->
+<!-- #gets gene symbol, transcript_id and go_id for all genes annotated with GO:0007507 -->
+<!-- gene.data <- getBM(attributes=c('external_gene_name', 'ensembl_transcript_id', 'go_id'), filters = 'go', values = 'GO:0006103', mart = ensembl) -->
+<!-- ``` -->
+
+## Distribution of Methylation by Genomic and CpG Annotation
+
+The following figure illustrates the enrichment of differential
+methylation with respect to CpG-based and genomic annotations.
+
+```{r Methylation Distribution}
+library(plotly)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(readxl)
+library(kableExtra)
+library(ComplexHeatmap)
+library(openxlsx)
+
+##Create a regional annotation matrix of the m450k array
+Region_epic<-Results_dmp %>% 
+  dplyr::select(Row.names, UCSC_RefGene_Group, Relation_to_Island)
+Stage1<-Region_epic %>% 
+  mutate(UCSC_RefGene_Group = strsplit(as.character(UCSC_RefGene_Group), ";")) %>% 
+  unnest(UCSC_RefGene_Group) 
+Stage2<-Stage1 %>% 
+  mutate(Relation_to_Island = strsplit(as.character(Relation_to_Island), ";")) %>%  
+  unnest(Relation_to_Island)
+Stage3<-distinct(Stage2)
+Regional.Groups<-dplyr::group_by_(Stage3, "UCSC_RefGene_Group", "Relation_to_Island") %>% 
+  tally()
+Region.matrix<-Regional.Groups %>% 
+  spread(Relation_to_Island, n)
+Region.matrix<-Region.matrix %>% 
+  dplyr::select(UCSC_RefGene_Group, OpenSea, N_Shelf, N_Shore, Island, S_Shore, S_Shelf)
+rownames(Region.matrix)<-Region.matrix$UCSC_RefGene_Group
+Region.matrix<-Region.matrix[c("TSS1500", "TSS200", "5'UTR", "1stExon", "Body", "3'UTR"),]
+rownames(Region.matrix)<-Region.matrix$UCSC_RefGene_Group
+Contour_3D_epic<-Region.matrix[,-1]
+rownames(Contour_3D_epic)<-Region.matrix$UCSC_RefGene_Group
+write.xlsx(Contour_3D_epic, "../2_Output/Contour.3D_EPIC.xlsx", overwrite = TRUE)
+
+##Create a regional annotation matrix of differentially-methylated positions
+Region_p05<-Results_dmp_p05 %>% dplyr::select(Row.names, UCSC_RefGene_Group, Relation_to_Island)
+Stage1<-Region_p05 %>% mutate(UCSC_RefGene_Group = strsplit(as.character(UCSC_RefGene_Group), ";")) %>% unnest(UCSC_RefGene_Group) 
+Stage2<-Stage1 %>% mutate(Relation_to_Island = strsplit(as.character(Relation_to_Island), ";")) %>%  unnest(Relation_to_Island)
+Stage3<-distinct(Stage2)
+Regional.Groups<-dplyr::group_by_(Stage3, "UCSC_RefGene_Group", "Relation_to_Island") %>% tally()
+Region.matrix<-Regional.Groups %>% spread(Relation_to_Island, n)
+Region.matrix<-Region.matrix %>% dplyr::select(UCSC_RefGene_Group, OpenSea, N_Shelf, N_Shore, Island, S_Shore, S_Shelf)
+rownames(Region.matrix)<-Region.matrix$UCSC_RefGene_Group
+Region.matrix<-Region.matrix[c("TSS1500", "TSS200", "5'UTR", "1stExon", "Body", "3'UTR"),]
+rownames(Region.matrix)<-Region.matrix$UCSC_RefGene_Group
+Contour_3D<-Region.matrix[,-1]
+rownames(Contour_3D)<-Region.matrix$UCSC_RefGene_Group
+write.csv(Contour_3D, "../2_Output/Contour.3D_DMPs.p05.csv")
+### Identify DMP Enrichment (IMPORTANT)
+Enrichment_Region<-Contour_3D/Contour_3D_epic
+Promoter_enr<-Enrichment_Region[rownames(Enrichment_Region)=="TSS200",] + Enrichment_Region[rownames(Enrichment_Region)=="TSS1500",]
+rownames(Promoter_enr)<-"Promoter"
+Enrichment_Region<-Enrichment_Region %>% 
+  filter(!grepl("TSS", rownames(Enrichment_Region))) %>%
+  rbind(Promoter_enr, .) %>%
+  data.matrix()
+paletteLength<-100
+myColor <- colorRampPalette(c("dodgerblue4", "white", "brown4"))(paletteLength)
+pheatmap(Enrichment_Region, color = myColor, cluster_rows = FALSE, cluster_cols = FALSE, filename = paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_DMP.Distribution.pdf"))
+
+write.csv(Enrichment_Region, "DCM_vs_CON.csv")
+##Make a Table of the CpG Methylation Distribution
+Enrichment_Region %>% kable( align="c", booktabs=T, 
+                     caption="Methylation Distribution") %>% 
+  kable_styling(latex_options=c("striped", "condensed", "repeat_header"))
+write.xlsx(Enrichment_Region, paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_DMP.Enrichment_3D.xlsx"), overwrite = T)
+color <- colorRampPalette(c("grey", "orange", "red"))
+t <- list(
+  family = "times",
+  size = 16,
+  color = "black")
+x_axis<-list(title = 'CpG Region', 
+                     type="category", 
+                     zeroline=TRUE, 
+                     showline=TRUE, 
+                     zerolinewidth = 4, 
+            zerolinecolor="darkgrey", 
+            linecolor="darkgrey", 
+            linewidth=4, 
+            titlefont=t, 
+            tickfont=t)
+y_axis<-list(title = 'Gene Region', 
+                     type="category", 
+                     zeroline=TRUE, 
+                     showline=TRUE, 
+                     zerolinewidth = 4, 
+            zerolinecolor="darkgrey", 
+            linecolor="darkgrey", 
+            linewidth=4, 
+            titlefont=t, 
+            tickfont=t)
+z_axis<-list(title = 'Number of DMPs', 
+                     zerolinewidth = 4, 
+                    zerolinecolor="darkgrey", 
+                    linecolor="darkgrey", 
+                    linewidth=4, 
+                    titlefont=t, 
+                    tickfont=t)
+q<-plot_ly(z=~Enrichment_Region, colors=color(10), 
+    text=as.character(rownames(Enrichment_Region))) %>% add_surface() %>% 
+    layout(scene = list(xaxis = x_axis, yaxis = y_axis, zaxis = z_axis))
+q #must comment out for PDF generation via knitr (Pandoc).
+```
+
+## Figure XX: Heatmap and Hierarchical Clustering of Differential Methylation (P \< 0.05)
+
+Due to the prominent signature of CpG Island-associated promoter
+methylation in iPSCs exposed to serum for failing and non-failing
+patients, we examined all DMPs present within this region via heatmap.
+
+```{r Methylation_Heatmap, fig.cap="\\label{Methylation_Heatmap}Heatmap and Hierarchical Clustering of Promoter CpG Island Methylation Significant Between ICM and NICM (P<0.05)."}
+library(ComplexHeatmap)
+library(dplyr)
+##Import Data Matrix
+# betaHM<-read.csv("../1_Input/EPIC.betaValues.csv", row.names = 1)
+## Filters to Apply to DMP
+pvalue_threshold=0.001
+METHYLATION=0
+DMP_location="Island"
+Gene_region="TSS"
+Samples<-AnnoTargets$Sample_Name
+##Filter Differential Methylation Data
+DMP.p05<-Results %>% filter(pval<pvalue_threshold)
+DMP.p05<-DMP.p05 %>% dplyr::select(Row.names, 
+                            Methylation.Diff, 
+                            pval, 
+                            qval, 
+                            Relation_to_Island, 
+                            UCSC_RefGene_Group, 
+                            chr, 
+                            pos, 
+                            matches(Samples)) %>%
+                      filter(abs(Methylation.Diff)>METHYLATION)
+DMP.p05.Region<-DMP.p05 %>% 
+  # filter(grepl(DMP_location, Relation_to_Island)) %>%
+  filter(grepl(Gene_region, UCSC_RefGene_Group)) %>% 
+  dplyr::select(matches(AnnoTargets$Sample_Name)) %>%
+  data.matrix()
+#Import the Index File
+LVAD_Counts_Data <- targets
+rownames(LVAD_Counts_Data)<-targets$Sample_Name
+Index<-LVAD_Counts_Data %>% dplyr::select(Sample_Group)
+Index<-as.data.frame(Index)
+paletteLength <- 100
+ann_colors = list(Sample_Group = c(DCM="darkcyan", CON="darkgray"), Outcome = c(Bad = "firebrick2", Good = "darkgoldenrod2", CON = "black"))
+myColor <- colorRampPalette(c("dodgerblue4", "white", "goldenrod2"))(paletteLength)
+pheatmap::pheatmap(DMP.p05.Region, scale="row", 
+                      cluster_cols = TRUE, 
+                      cluster_rows = TRUE,
+                      #breaks = myBreaks,
+                      cutree_cols = 2,
+                      cutree_rows = 2,
+                      angle_col = 45,
+                      fontsize_col = 8,
+                      color = myColor, 
+                      show_rownames = FALSE, 
+                      border_color = NA, 
+                      annotation_col = Index,
+                      annotation_colors=ann_colors,
+                      filename = paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_", DMP_location, ".", Gene_region,".heatmap.pdf"))
+
+pheatmap::pheatmap(DMP.p05.Region, scale="row", 
+                      cluster_cols = TRUE, 
+                      cluster_rows = TRUE,
+                      #breaks = myBreaks,
+                      cutree_cols = 2,
+                      cutree_rows = 2,
+                      angle_col = 45,
+                      fontsize_col = 8,
+                      color = myColor, 
+                      show_rownames = FALSE, 
+                      border_color = NA, 
+                      annotation_col = Index,
+                      annotation_colors=ann_colors)
+```
+
+## Figure XX: Volcano Plot - DMPs
+
+```{r Volcano}
+# Load packages
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(openxlsx)
+Results<-read.xlsx(paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_DMPs.xlsx"), sheet = "Unfiltered")
+#Read data from the web
+Volcano_data = mutate(Results, sig=ifelse(Results$pval<0.05 & abs(Results$Methylation.Diff)>5, "P<0.05 and |Methylation| > 5%", "Not Sig"), minuslogpvalue = -log(pval), Methylation=Methylation.Diff)
+
+#Split gene names for labelling
+Volcano_data_split<-Volcano_data %>% mutate(UCSC_RefGene_Name = strsplit(as.character(UCSC_RefGene_Name), ";")) %>% unnest(UCSC_RefGene_Name) %>% distinct()
+
+max(Volcano_data$minuslogpvalue, na.rm = TRUE)
+# Results<-Results %>% filter(grepl("TSS", UCSC_RefGene_Group))
+#plot the ggplot
+p = ggplot(Volcano_data_split, aes(Methylation, minuslogpvalue)) + theme(panel.background = element_rect("white", colour = "black", size=2), panel.grid.major = element_line(colour = "gray50", size=.75), panel.grid.minor = element_line(colour = "gray50", size=0.4)) + 
+geom_point(aes(fill=sig, size = minuslogpvalue), colour="grey", shape=21, stroke = 0, alpha = 8/10) + labs(x=expression(Methylation_Change), y=expression(-Log[10](P-value))) + xlim(min(Volcano_data$Methylation, na.rm = TRUE),max(Volcano_data$Methylation, na.rm = TRUE))+ ylim(-0, max(Volcano_data$minuslogpvalue, na.rm = TRUE)) +   geom_hline(yintercept = 0, size = 1) + geom_vline(xintercept=0, size=1)+ 
+  scale_fill_manual(values=c("grey", "darkgoldenrod2")) +
+  scale_size_continuous(range = c(.25, 4))
+pdf(file = paste0("../2_Output/", COMPARISON, "/", COMPARISON, "Volcano.Plot.pdf"), height = 6, width = 10)
+p+
+  geom_text_repel(data=top_n(filter(Volcano_data_split, pval<0.05, Methylation < 0, sig!="Not Sig"), 10, -Methylation), aes(label=UCSC_RefGene_Name)) +
+  geom_text_repel(data=top_n(filter(Volcano_data_split, pval<0.05, Methylation > 0, sig!="Not Sig"), 10, Methylation), aes(label=UCSC_RefGene_Name))
+dev.off()
+
+p+
+  geom_text_repel(data=top_n(filter(Volcano_data_split, pval<0.05, Methylation < 0, sig!="Not Sig"), 10, -Methylation), aes(label=UCSC_RefGene_Name)) +
+  geom_text_repel(data=top_n(filter(Volcano_data_split, pval<0.05, Methylation > 0, sig!="Not Sig"), 10, Methylation), aes(label=UCSC_RefGene_Name))
+
+```
+
+# Combined Analysis - Biopsy and iPSC
+
+```{r Combination}
+library(openxlsx)
+library(dplyr)
+library(tidyr)
+library(ComplexHeatmap)
+library(minfi)
+NUMBER = 20
+STAT = 0.001
+#Index
+AnnoTargets<-read.metharray.sheet(base="../1_Input/IDAT", pattern=".csv")
+rownames(AnnoTargets)<-AnnoTargets$Sample_Name
+Index_combined<-AnnoTargets %>% dplyr::select(Sample_Group, Tissue, Sample_ID)
+#iPSC Data
+DMPs_iPSC<-read.xlsx("../2_Output/iPSC_DCM_vs_CON/iPSC_DCM_vs_CON_DMPs.xlsx", sheet = "P_0.05", rowNames = T)
+iPSC_stats<-DMPs_iPSC %>% dplyr::select(Methylation_iPSC = Methylation.Diff, pval_iPSC = pval, adj.P.Val_iPSC = qval, Name:Regulatory_Feature_Group)
+
+
+#biopsies
+DMPs_heart<-read.xlsx("../2_Output/heart_DCM_vs_CON/heart_DCM_vs_CON_DMPs.xlsx", sheet = "P_0.05", rowNames = T)
+heart_stats<-DMPs_heart %>% dplyr::select(Methylation_heart = Methylation.Diff, pval_heart = pval, adj.P.Val_heart = qval, Name:Regulatory_Feature_Group)
+heart_index<-AnnoTargets %>% dplyr::filter(Tissue=="heart") %>% dplyr::select(Tissue, Sample_Group, Sample_ID)
+
+#Beta
+beta_all<-read.csv("../1_Input/beta_all.csv", row.names = 1)
+
+#combine data
+Combined_DMPs<-inner_join(iPSC_stats, heart_stats)
+Combined_DMPs_Separated<-Combined_DMPs %>% mutate(UCSC_RefGene_Name = strsplit(as.character(UCSC_RefGene_Name), ";")) %>% unnest(UCSC_RefGene_Name) %>% distinct() %>% merge(., beta_all, by.x = "Name", by.y = 0)
+
+# Select only co-methylated positions (iPSC and heart)
+Combined_together<-Combined_DMPs_Separated %>% filter(Methylation_iPSC>0 & Methylation_heart>0 | Methylation_iPSC<0 & Methylation_heart<0) %>% arrange(desc(Methylation_iPSC)) %>% filter(pval_iPSC < STAT) %>% arrange(pval_iPSC)
+#Find row number for top candidates
+Candidates<-which(Combined_together$UCSC_RefGene_Name == "ATG7")
+# Combined_together<-merge(Combined_together, beta_all, by.x = "Name", by.y = 0)
+rownames(Combined_together)<-make.unique(Combined_together$UCSC_RefGene_Name, sep = ".")
+#Create heatmap matrices and annotation
+heart_hm<-Combined_together %>% dplyr::select(contains("NF") | contains("biopsy")) %>% data.matrix()
+heart_index<-AnnoTargets %>% dplyr::filter(Tissue=="heart") %>% dplyr::select(Tissue, Sample_Group, Sample_ID)
+iPSC_hm<-Combined_together %>% dplyr::select(contains("cells") & contains("co"),contains("cells") & contains("go"), contains("cells") & contains("bo")) %>% data.matrix()
+iPSC_index<-AnnoTargets %>% dplyr::filter(Tissue=="iPSC") %>% dplyr::select(Tissue, Sample_Group, Sample_ID)
+write.xlsx(Combined_together, "../2_Output/Overlapping.DMPs_iPSC.Biopsy.xlsx", overwrite = T)
+
+# Venn Diagram
+library(VennDiagram)
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+x<-list(iPSC = DMPs_iPSC$Name, heart = DMPs_heart$Name)
+venn.diagram(x,fill = c("darkgray", "firebrick2"), alpha = c(0.75, 0.75), lty = 'blank', filename = "../2_Output/Overlapping_DMPs_iPSC.Biopsy.png", na = "remove")
+# Heatmap
+
+ann_colors = list(Sample_Group = c(DCM="#1b9e77", CON = "goldenrod2"), Tissue = c(heart = "coral2", iPSC = "darkgray"), Sample_ID = c(A = "white", B = "orange", C = "black", F = "red", G = "green", T = "blue", V = "purple"))
+paletteLength <- 100
+myColor <- colorRampPalette(c("dodgerblue4", "white", "gold2"))(paletteLength)
+
+#iPSC
+heatmap_iPSC<-ComplexHeatmap::pheatmap(iPSC_hm, scale="row",
+                    cluster_cols = F,
+                    cluster_rows = T,
+                     # angle_col = 45,
+                     fontsize_col = 8,
+                     color = myColor,
+                    annotation_names_col = FALSE,
+                     show_rownames = F,
+                     border_color = NA,
+                    annotation_colors = ann_colors,
+                    annotation_col = iPSC_index)
+heatmap_iPSC
+
+
+ha = rowAnnotation(foo = anno_mark(at = c(1:10), labels = Combined_together$UCSC_RefGene_Name[1:10]))
+
+#heart
+heatmap_heart<-ComplexHeatmap::pheatmap(heart_hm, scale = "row",
+                    cluster_cols = F,
+                    cluster_rows = T,
+                     # angle_col = 45,
+                     fontsize_col = 8,
+                     color = myColor,
+                     show_rownames = F,
+                     border_color = NA,
+                    annotation_names_col = FALSE,
+                    right_annotation = ha,
+                    annotation_colors = ann_colors,
+                    annotation_col = heart_index)
+
+heatmap_heart
+heatmap_iPSC + heatmap_heart
+
+pdf(file="../2_Output/complexheatmap_combined.pdf", height = 5, width = 7, onefile = F)
+heatmap_iPSC + heatmap_heart
+dev.off()
+```
+# Validation
+```{r Validation}
+#Import Pepin et al. 2019 Combined methylation-RNA-sequencing dataset
+Pepin_DMPs<-read.xlsx("../1_Input/Validation/HF.Effect_NR_Pre.v.CON_Annotated_DiffMeth.xlsx")
+
+```
+
+# Motif Enrichment
+
+```{r motif}
+###### Working example (from BED file)
+library(monaLisa)
+library(GenomicRanges)
+library(SummarizedExperiment)
+library(openxlsx)
+library(dplyr)
+library(TFBSTools)
+library(JASPAR2020)
+library(BSgenome.Hsapiens.UCSC.hg19)
+mcparams <- BiocParallel::MulticoreParam(10L) #parallelization (10-core)
+DMPs_iPSC<-read.xlsx("../3_Results/Overlapping.DMPs_iPSC.Biopsy.xlsx", startRow = 2)
+bed<-DMPs_iPSC %>% dplyr::select(chr, pos, Methylation_iPSC) %>% transmute(seqnames=chr, start=pos-20, end=pos+20, width = 41, strand = "*", deltaMeth=Methylation_iPSC)
+bed_mr<-as(bed, "GRanges")
+# define bins by differential methylation
+bins <- bin(x = bed_mr$deltaMeth, binmode = "equalN", nElement = 100, minAbsX = 1)
+table(bins)
+pdf(paste0("../2_Output/_bins.pdf"), width = 7.5, height = 5)
+plotBinDensity(bed_mr$deltaMeth, bins, legend = "topright")
+dev.off()
+# get PWMs from JASPAR
+pwms <- getMatrixSet(JASPAR2020,
+                     opts = list(matrixtype = "PWM",
+                                 tax_group = "vertebrates"))
+# trim bed file for sequenes that are consistent
+lmrsel <- trim(resize(bed_mr, width = median(width(bed_mr)), fix = "center"))
+# get sequences from mouse genome
+lmrseqs <- getSeq(BSgenome.Hsapiens.UCSC.hg19, bed_mr)
+# GC proportion (bias)
+plotBinDiagnostics(seqs = lmrseqs, bins = bins, aspect = "GCfrac")
+plotBinDiagnostics(seqs = lmrseqs, bins = bins, aspect = "dinucfreq")
+# run motif enrichment
+se <- calcBinnedMotifEnrR(seqs = lmrseqs, bins = bins, pwmL = pwms, BPPARAM = BiocParallel::MulticoreParam(8))
+# Filter results
+Test<-as.data.frame(assays(se))
+sel <- apply(assay(se, "negLog10P"), 1, 
+             function(x) max(abs(x), 0, na.rm = TRUE)) > 1.0
+sum(sel)
+#> [1] 59
+seSel <- se[sel, ]
+
+# plot
+pdf("../2_Output/Motifs.pdf", width = 11, height = 10)
+plotMotifHeatmaps(x = seSel, which.plots = c("log2enr", "negLog10P"), 
+                  width = 2.0, cluster = TRUE, maxEnr = 2, maxSig = 10, 
+                  show_motif_GC = TRUE, show_dendrogram = T,show_seqlogo = TRUE)
+dev.off()
+
+plotMotifHeatmaps(x = seSel, which.plots = c("log2enr", "negLog10P"), 
+                  width = 2.0, cluster = TRUE, maxEnr = 2, maxSig = 10, 
+                  show_motif_GC = TRUE, show_dendrogram = T,show_seqlogo = TRUE)
+```
+
+# Supplemental Table: R Session Information
+
+All packages and setting are acquired using the following command:
+
+```{r settings}
+options(kableExtra.latex.load_packages = FALSE)
+Run_tE<-Sys.time()
+Run_time<-Run_tE - Run_tS
+Run_time
+library(kableExtra)
+sinfo<-devtools::session_info()
+sinfo$platform
+sinfo$packages %>% kable( 
+                         align="c", 
+                         caption="Packages and Required Dependencies") %>% 
+    kable_styling(latex_options=c("repeat_header", "condensed"))
+```
